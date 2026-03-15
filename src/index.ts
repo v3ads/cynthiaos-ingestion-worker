@@ -301,6 +301,44 @@ app.post("/ingest/test-report", async (_req: Request, res: Response) => {
   }
 });
 
+// ── Transform trigger helper ─────────────────────────────────────────────────
+
+const TRANSFORM_WORKER_URL =
+  process.env.TRANSFORM_WORKER_URL ??
+  "https://cynthiaos-transform-worker-production.up.railway.app";
+
+interface TransformRunResult {
+  success: boolean;
+  processed: boolean;
+  silver_id?: string;
+  bronze_report_id?: string;
+  message?: string;
+  error?: string;
+}
+
+async function triggerTransform(): Promise<TransformRunResult> {
+  const url = `${TRANSFORM_WORKER_URL}/transform/run`;
+  console.log(`[${SERVICE_NAME}] triggerTransform — calling ${url}`);
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    const data = (await resp.json()) as TransformRunResult;
+    if (data.processed) {
+      console.log(`[${SERVICE_NAME}] triggerTransform — silver_id=${data.silver_id} bronze_report_id=${data.bronze_report_id}`);
+    } else {
+      console.log(`[${SERVICE_NAME}] triggerTransform — no unprocessed records (${data.message ?? ""})`);
+    }
+    return data;
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[${SERVICE_NAME}] triggerTransform — HTTP call failed: ${message}`);
+    // Return a non-fatal error result — ingestion itself succeeded
+    return { success: false, processed: false, error: message };
+  }
+}
+
 // ── POST /ingest/report (generic ingestion endpoint) ────────────────────────
 
 interface IngestReportBody {
@@ -357,8 +395,12 @@ app.post("/ingest/report", async (req: Request, res: Response) => {
     // 4. Insert pipeline_metadata — bronze stage created
     const meta = await insertPipelineMetadata(sql, report.id, "bronze", "created");
 
-    // Note: job left in 'started' status — transform step will complete it
-    // For now return job_id so caller can track
+    // 5. Trigger transform worker (fire-and-await; non-fatal if it fails)
+    // Close the DB connection first so transform-worker gets a fresh pool slot
+    await sql.end();
+    sql = null;
+    const transformResult = await triggerTransform();
+
     res.status(200).json({
       success: true,
       job_id: job.id,
@@ -387,6 +429,7 @@ app.post("/ingest/report", async (req: Request, res: Response) => {
         status: meta.status,
         created_at: meta.created_at,
       },
+      transform: transformResult,
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
