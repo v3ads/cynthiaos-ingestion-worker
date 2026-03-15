@@ -164,6 +164,106 @@ app.post("/ingest/test", async (_req: Request, res: Response) => {
   }
 });
 
+// ── Bronze AppFolio report ──────────────────────────────────────────────────
+
+interface BronzeAppfolioReport {
+  id: string;
+  report_type: string;
+  report_date: string;
+  raw_data: Record<string, unknown>;
+  ingested_at: Date;
+}
+
+async function insertBronzeReport(
+  sql: postgres.Sql,
+  reportType: string,
+  reportDate: string,
+  rawData: Record<string, unknown>
+): Promise<BronzeAppfolioReport> {
+  const now = new Date();
+  const rows = await sql<BronzeAppfolioReport[]>`
+    INSERT INTO bronze_appfolio_reports (report_type, report_date, raw_data, ingested_at)
+    VALUES (${reportType}, ${reportDate}::date, ${sql.json(rawData as any)}, ${now})
+    RETURNING *
+  `;
+  const report = rows[0];
+  console.log(`[${SERVICE_NAME}] insertBronzeReport — id=${report.id} type=${report.report_type} date=${report.report_date}`);
+  return report;
+}
+
+// ── POST /ingest/test-report ──────────────────────────────────────────────────
+app.post("/ingest/test-report", async (_req: Request, res: Response) => {
+  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+
+  const sampleRawEvent: Record<string, unknown> = {
+    test: true,
+    source: "appfolio_test",
+    generated_at: new Date().toISOString(),
+    report_type: "test_report",
+    report_date: today,
+  };
+
+  const sampleReportData: Record<string, unknown> = {
+    test: true,
+    report_type: "test_report",
+    report_date: today,
+    generated_at: new Date().toISOString(),
+    rows: [
+      { property_id: "TEST-001", unit: "101", tenant: "Test Tenant", rent: 1500, status: "current" },
+      { property_id: "TEST-001", unit: "102", tenant: "Test Tenant 2", rent: 1600, status: "current" },
+    ],
+    summary: { total_units: 2, total_rent: 3100, occupancy_rate: 1.0 },
+  };
+
+  let sql: postgres.Sql | null = null;
+  try {
+    sql = getDb();
+
+    // 1. Create ingestion job
+    const job = await createIngestionJob(sql, "bronze_report_ingest", "api_test");
+
+    // 2. Insert raw ingestion event
+    const event = await insertRawIngestionEvent(sql, "appfolio_test", sampleRawEvent);
+
+    // 3. Insert bronze report record
+    const report = await insertBronzeReport(sql, "test_report", today, sampleReportData);
+
+    // 4. Complete ingestion job
+    const completedJob = await completeIngestionJob(sql, job.id);
+
+    res.status(200).json({
+      success: true,
+      report_id: report.id,
+      report: {
+        id: report.id,
+        report_type: report.report_type,
+        report_date: report.report_date,
+        raw_data: report.raw_data,
+        ingested_at: report.ingested_at,
+      },
+      event: {
+        id: event.id,
+        source: event.source,
+        received_at: event.received_at,
+      },
+      job: {
+        id: completedJob.id,
+        job_type: completedJob.job_type,
+        trigger_type: completedJob.trigger_type,
+        status: completedJob.status,
+        started_at: completedJob.started_at,
+        completed_at: completedJob.completed_at,
+      },
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[${SERVICE_NAME}] POST /ingest/test-report error:`, message);
+    res.status(500).json({ success: false, error: message });
+  } finally {
+    if (sql) await sql.end();
+  }
+});
+
 // ── POST /jobs/start ──────────────────────────────────────────────────────────
 app.post("/jobs/start", async (req: Request, res: Response) => {
   const jobType: string = req.body?.job_type ?? "manual";
