@@ -86,6 +86,84 @@ async function completeIngestionJob(
   return job;
 }
 
+// ── Raw ingestion event ─────────────────────────────────────────────────────
+
+interface RawIngestionEvent {
+  id: string;
+  source: string;
+  payload: Record<string, unknown>;
+  received_at: Date;
+}
+
+async function insertRawIngestionEvent(
+  sql: postgres.Sql,
+  source: string,
+  payload: Record<string, unknown>
+): Promise<RawIngestionEvent> {
+  const now = new Date();
+  const rows = await sql<RawIngestionEvent[]>`
+    INSERT INTO raw_ingestion_events (source, payload, received_at)
+    VALUES (${source}, ${sql.json(payload as any)}, ${now})
+    RETURNING *
+  `;
+  const event = rows[0];
+  console.log(`[${SERVICE_NAME}] insertRawIngestionEvent — id=${event.id} source=${event.source}`);
+  return event;
+}
+
+// ── POST /ingest/test ─────────────────────────────────────────────────────────
+app.post("/ingest/test", async (_req: Request, res: Response) => {
+  const samplePayload: Record<string, unknown> = {
+    test: true,
+    source: "test",
+    generated_at: new Date().toISOString(),
+    data: {
+      property_id: "TEST-001",
+      report_type: "rent_roll",
+      period: "2026-03",
+    },
+  };
+
+  let sql: postgres.Sql | null = null;
+  try {
+    sql = getDb();
+
+    // 1. Create ingestion job
+    const job = await createIngestionJob(sql, "raw_event_ingest", "api_test");
+
+    // 2. Insert raw ingestion event
+    const event = await insertRawIngestionEvent(sql, "test", samplePayload);
+
+    // 3. Complete ingestion job
+    const completedJob = await completeIngestionJob(sql, job.id);
+
+    res.status(200).json({
+      success: true,
+      event_id: event.id,
+      event: {
+        id: event.id,
+        source: event.source,
+        payload: event.payload,
+        received_at: event.received_at,
+      },
+      job: {
+        id: completedJob.id,
+        job_type: completedJob.job_type,
+        trigger_type: completedJob.trigger_type,
+        status: completedJob.status,
+        started_at: completedJob.started_at,
+        completed_at: completedJob.completed_at,
+      },
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[${SERVICE_NAME}] POST /ingest/test error:`, message);
+    res.status(500).json({ success: false, error: message });
+  } finally {
+    if (sql) await sql.end();
+  }
+});
+
 // ── POST /jobs/start ──────────────────────────────────────────────────────────
 app.post("/jobs/start", async (req: Request, res: Response) => {
   const jobType: string = req.body?.job_type ?? "manual";
