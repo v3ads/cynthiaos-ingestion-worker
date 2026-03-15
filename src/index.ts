@@ -86,6 +86,33 @@ async function completeIngestionJob(
   return job;
 }
 
+// ── Pipeline metadata ─────────────────────────────────────────────────────────
+
+interface PipelineMetadata {
+  id: string;
+  bronze_report_id: string | null;
+  stage: string;
+  status: string;
+  created_at: Date;
+  updated_at: Date;
+}
+
+async function insertPipelineMetadata(
+  sql: postgres.Sql,
+  bronzeReportId: string | null,
+  stage: string,
+  status: string
+): Promise<PipelineMetadata> {
+  const rows = await sql<PipelineMetadata[]>`
+    INSERT INTO pipeline_metadata (bronze_report_id, stage, status, created_at, updated_at)
+    VALUES (${bronzeReportId}, ${stage}, ${status}, NOW(), NOW())
+    RETURNING *
+  `;
+  const meta = rows[0];
+  console.log(`[${SERVICE_NAME}] insertPipelineMetadata — id=${meta.id} stage=${meta.stage} status=${meta.status} bronze_report_id=${meta.bronze_report_id}`);
+  return meta;
+}
+
 // ── Raw ingestion event ─────────────────────────────────────────────────────
 
 interface RawIngestionEvent {
@@ -228,7 +255,10 @@ app.post("/ingest/test-report", async (_req: Request, res: Response) => {
     // 3. Insert bronze report record
     const report = await insertBronzeReport(sql, "test_report", today, sampleReportData);
 
-    // 4. Complete ingestion job
+    // 4. Insert pipeline_metadata — bronze stage created
+    const meta = await insertPipelineMetadata(sql, report.id, "bronze", "created");
+
+    // 5. Complete ingestion job
     const completedJob = await completeIngestionJob(sql, job.id);
 
     res.status(200).json({
@@ -240,6 +270,13 @@ app.post("/ingest/test-report", async (_req: Request, res: Response) => {
         report_date: report.report_date,
         raw_data: report.raw_data,
         ingested_at: report.ingested_at,
+      },
+      pipeline_metadata: {
+        id: meta.id,
+        bronze_report_id: meta.bronze_report_id,
+        stage: meta.stage,
+        status: meta.status,
+        created_at: meta.created_at,
       },
       event: {
         id: event.id,
