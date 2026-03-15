@@ -301,6 +301,102 @@ app.post("/ingest/test-report", async (_req: Request, res: Response) => {
   }
 });
 
+// ── POST /ingest/report (generic ingestion endpoint) ────────────────────────
+
+interface IngestReportBody {
+  source: string;
+  report_type: string;
+  report_date: string; // YYYY-MM-DD
+  payload: Record<string, unknown>;
+}
+
+app.post("/ingest/report", async (req: Request, res: Response) => {
+  const body = req.body as Partial<IngestReportBody>;
+
+  // Validate required fields
+  if (!body.source || !body.report_type || !body.report_date || !body.payload) {
+    res.status(400).json({
+      success: false,
+      error: "Missing required fields: source, report_type, report_date, payload",
+    });
+    return;
+  }
+
+  const { source, report_type, report_date, payload } = body as IngestReportBody;
+
+  // Validate date format
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(report_date)) {
+    res.status(400).json({
+      success: false,
+      error: "report_date must be in YYYY-MM-DD format",
+    });
+    return;
+  }
+
+  let sql: postgres.Sql | null = null;
+  try {
+    sql = getDb();
+
+    // 1. Create ingestion job
+    const job = await createIngestionJob(sql, `${source}_report_ingest`, "api");
+    console.log(`[${SERVICE_NAME}] POST /ingest/report — job_id=${job.id} source=${source} report_type=${report_type} report_date=${report_date}`);
+
+    // 2. Insert raw ingestion event
+    const rawEventPayload: Record<string, unknown> = {
+      source,
+      report_type,
+      report_date,
+      received_at: new Date().toISOString(),
+      payload,
+    };
+    const event = await insertRawIngestionEvent(sql, source, rawEventPayload);
+
+    // 3. Insert bronze report record
+    const report = await insertBronzeReport(sql, report_type, report_date, payload);
+
+    // 4. Insert pipeline_metadata — bronze stage created
+    const meta = await insertPipelineMetadata(sql, report.id, "bronze", "created");
+
+    // Note: job left in 'started' status — transform step will complete it
+    // For now return job_id so caller can track
+    res.status(200).json({
+      success: true,
+      job_id: job.id,
+      job: {
+        id: job.id,
+        job_type: job.job_type,
+        trigger_type: job.trigger_type,
+        status: job.status,
+        started_at: job.started_at,
+      },
+      raw_event: {
+        id: event.id,
+        source: event.source,
+        received_at: event.received_at,
+      },
+      bronze_report: {
+        id: report.id,
+        report_type: report.report_type,
+        report_date: report.report_date,
+        ingested_at: report.ingested_at,
+      },
+      pipeline_metadata: {
+        id: meta.id,
+        bronze_report_id: meta.bronze_report_id,
+        stage: meta.stage,
+        status: meta.status,
+        created_at: meta.created_at,
+      },
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[${SERVICE_NAME}] POST /ingest/report error:`, message);
+    res.status(500).json({ success: false, error: message });
+  } finally {
+    if (sql) await sql.end();
+  }
+});
+
 // ── POST /jobs/start ──────────────────────────────────────────────────────────
 app.post("/jobs/start", async (req: Request, res: Response) => {
   const jobType: string = req.body?.job_type ?? "manual";
