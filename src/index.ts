@@ -395,7 +395,10 @@ app.post("/ingest/report", async (req: Request, res: Response) => {
     // 4. Insert pipeline_metadata — bronze stage created
     const meta = await insertPipelineMetadata(sql, report.id, "bronze", "created");
 
-    // 5. Trigger transform worker (fire-and-await; non-fatal if it fails)
+    // 5. Mark job as completed
+    await completeIngestionJob(sql, job.id);
+
+    // 6. Trigger transform worker (fire-and-await; non-fatal if it fails)
     // Close the DB connection first so transform-worker gets a fresh pool slot
     await sql.end();
     sql = null;
