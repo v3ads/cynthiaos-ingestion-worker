@@ -479,7 +479,62 @@ app.post("/jobs/start", async (req: Request, res: Response) => {
   }
 });
 
-// ── Health check ──────────────────────────────────────────────────────────────
+// ── POST /pipeline/run — On-demand full pipeline trigger ────────────────────────
+// Fetches all AppFolio reports, ingests to Bronze, then drains Silver → Gold.
+// Returns immediately; pipeline runs asynchronously in the background.
+const TRANSFORM_WORKER_URL_INGEST = process.env.TRANSFORM_WORKER_URL ||
+  'https://cynthiaos-transform-worker-production.up.railway.app';
+const MAX_GOLD_ITERATIONS_INGEST = 100;
+
+let pipelineRunning = false;
+
+app.post('/pipeline/run', async (_req: Request, res: Response) => {
+  if (pipelineRunning) {
+    res.status(409).json({ success: false, error: 'Pipeline already running' });
+    return;
+  }
+
+  const jobId = `sync_${Date.now()}`;
+  res.json({
+    success: true,
+    job_id: jobId,
+    message: 'Pipeline sync started. Data will be updated in approximately 5–10 minutes.',
+  });
+
+  pipelineRunning = true;
+  (async () => {
+    console.log(`[${SERVICE_NAME}] pipeline/run job=${jobId} starting`);
+    try {
+      // Step 1+2: Fetch AppFolio reports and ingest to Bronze
+      // We call our own /ingest/report endpoint for each report via fetchReports
+      // Use dynamic import since fetchReports.js is CommonJS
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { fetchAndIngestAllReports } = require('../../fetchReports.js');
+      const fetchResults = await fetchAndIngestAllReports();
+      console.log(`[${SERVICE_NAME}] pipeline/run job=${jobId} fetch complete: ${fetchResults.success.length} ok, ${fetchResults.failed.length} failed`);
+
+      // Step 3: Drain Gold promotion queue
+      let iterations = 0;
+      while (iterations < MAX_GOLD_ITERATIONS_INGEST) {
+        iterations++;
+        const goldRes = await fetch(`${TRANSFORM_WORKER_URL_INGEST}/gold/run`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        });
+        if (!goldRes.ok) break;
+        const body = await goldRes.json() as { processed?: boolean };
+        if (!body.processed) break;
+      }
+      console.log(`[${SERVICE_NAME}] pipeline/run job=${jobId} gold drain complete after ${iterations} iteration(s)`);
+    } catch (err: unknown) {
+      console.error(`[${SERVICE_NAME}] pipeline/run job=${jobId} error:`, (err as Error).message);
+    } finally {
+      pipelineRunning = false;
+    }
+  })();
+});
+
+// ── Health check ──────────────────────────────────────────────────────────────────
 app.get("/health", (_req: Request, res: Response) => {
   res.status(200).json({
     service: SERVICE_NAME,
