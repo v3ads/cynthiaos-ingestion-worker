@@ -509,7 +509,7 @@ app.post('/pipeline/run', async (_req: Request, res: Response) => {
       // We call our own /ingest/report endpoint for each report via fetchReports
       // Use dynamic import since fetchReports.js is CommonJS
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { fetchAndIngestAllReports } = require('../../fetchReports.js');
+      const { fetchAndIngestAllReports } = require('../fetchReports.js');
       const fetchResults = await fetchAndIngestAllReports();
       console.log(`[${SERVICE_NAME}] pipeline/run job=${jobId} fetch complete: ${fetchResults.success.length} ok, ${fetchResults.failed.length} failed`);
 

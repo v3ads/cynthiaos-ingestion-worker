@@ -19,6 +19,9 @@ COPY package*.json ./
 RUN npm ci --omit=dev --ignore-scripts
 
 COPY --from=builder /app/dist ./dist
+# fetchReports.js is plain CommonJS with no deps — copy it to /app root.
+# dist/index.js does require('../fetchReports.js') → resolves to /app/fetchReports.js
+COPY fetchReports.js ./fetchReports.js
 
 EXPOSE 3001
 
