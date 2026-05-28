@@ -288,10 +288,34 @@ async function fetchAndIngestAllReports() {
     }
 
     try {
-      console.log(`  [${report.id}] (${i + 1}/${reports.length}) Fetching...`);
+      console.log(`  [${report.id}] (${i + 1}/${reports.length}) Fetching... URL: ${report.url}`);
       const rows = await fetchReport(report, authHeader);
       const rowCount = Array.isArray(rows) ? rows.length : "?";
       console.log(`  [${report.id}] Fetched ${rowCount} rows. Ingesting...`);
+
+      // ── DIAGNOSTIC: work_order raw response inspection ──────────────────────
+      // Prints exactly what AppFolio's report API returns so we can confirm
+      // whether WO#1119-1130 are present at the source.
+      if (report.id === "work_order" && Array.isArray(rows)) {
+        const woNumbers = rows
+          .map(r => {
+            const wo = r.WorkOrderNumber ?? r["Work Order Number"] ?? r.work_order_number ?? "";
+            const n = parseInt(String(wo).split("-")[0], 10);
+            return Number.isFinite(n) ? n : null;
+          })
+          .filter(n => n !== null)
+          .sort((a, b) => b - a);
+        const highest = woNumbers.slice(0, 8);
+        const statusCounts = {};
+        for (const r of rows) {
+          const s = r.Status ?? r["Work Order Status"] ?? r.status ?? "unknown";
+          statusCounts[s] = (statusCounts[s] || 0) + 1;
+        }
+        console.log(`  [work_order] DIAGNOSTIC — AppFolio returned ${rows.length} records`);
+        console.log(`  [work_order] DIAGNOSTIC — highest WO#s: ${highest.join(", ")}`);
+        console.log(`  [work_order] DIAGNOSTIC — status breakdown: ${JSON.stringify(statusCounts)}`);
+        console.log(`  [work_order] DIAGNOSTIC — sample first row keys: ${rows[0] ? Object.keys(rows[0]).join(", ") : "(no rows)"}`);
+      }
 
       const ingested = await ingestReport(report.id, report.reportDate, rows);
       console.log(`  [${report.id}] ✅ Ingested — bronze_id=${ingested.bronze_report_id ?? "?"}`);
