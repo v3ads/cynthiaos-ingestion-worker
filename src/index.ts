@@ -505,12 +505,25 @@ app.post('/pipeline/run', async (_req: Request, res: Response) => {
   (async () => {
     console.log(`[${SERVICE_NAME}] pipeline/run job=${jobId} starting`);
     try {
-      // Step 1+2: Fetch AppFolio reports and ingest to Bronze
-      // We call our own /ingest/report endpoint for each report via fetchReports
-      // Use dynamic import since fetchReports.js is CommonJS
+      // Step 1+2: Fetch AppFolio reports and ingest to Bronze.
+      // Pass a directWrite callback so fetchReports writes Bronze IN-PROCESS via
+      // the DB instead of HTTP-POSTing back to this same worker. The self-POST
+      // (to railway.internal:3001) failed because the worker listens on Railway's
+      // injected PORT, not 3001 — causing "Network error" for every report.
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { fetchAndIngestAllReports } = require('../fetchReports.js');
-      const fetchResults = await fetchAndIngestAllReports();
+      const directWrite = async (reportType: string, reportDate: string, rows: unknown[]) => {
+        const wsql = getDb();
+        const payload = { results: rows };
+        await insertRawIngestionEvent(wsql, 'appfolio', {
+          source: 'appfolio', report_type: reportType, report_date: reportDate,
+          received_at: new Date().toISOString(), payload,
+        });
+        const report = await insertBronzeReport(wsql, reportType, reportDate, payload);
+        await insertPipelineMetadata(wsql, report.id, 'bronze', 'created');
+        return { bronze_report_id: report.id, id: report.id };
+      };
+      const fetchResults = await fetchAndIngestAllReports(directWrite);
       console.log(`[${SERVICE_NAME}] pipeline/run job=${jobId} fetch complete: ${fetchResults.success.length} ok, ${fetchResults.failed.length} failed`);
 
       // Step 3: Drain Gold promotion queue

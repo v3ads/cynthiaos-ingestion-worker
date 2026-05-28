@@ -263,7 +263,11 @@ async function ingestReport(reportId, reportDate, rows, attempt = 0) {
 }
 
 // ── Main export ───────────────────────────────────────────────────────────────
-async function fetchAndIngestAllReports() {
+async function fetchAndIngestAllReports(directWrite = null) {
+  // directWrite(reportId, reportDate, rows) — when provided (ingestion worker
+  // running in-process), writes Bronze directly via DB, bypassing the HTTP
+  // self-call that fails when the internal URL port doesn't match Railway's PORT.
+  // When null (cron worker), falls back to HTTP POST as before.
   if (!APPFOLIO_CLIENT_ID || !APPFOLIO_CLIENT_SECRET) {
     throw new Error("APPFOLIO_CLIENT_ID and APPFOLIO_CLIENT_SECRET must be set");
   }
@@ -317,8 +321,16 @@ async function fetchAndIngestAllReports() {
         console.log(`  [work_order] DIAGNOSTIC — sample first row keys: ${rows[0] ? Object.keys(rows[0]).join(", ") : "(no rows)"}`);
       }
 
-      const ingested = await ingestReport(report.id, report.reportDate, rows);
-      console.log(`  [${report.id}] ✅ Ingested — bronze_id=${ingested.bronze_report_id ?? "?"}`);
+      let bronzeId;
+      if (typeof directWrite === "function") {
+        // In-process DB write — no network hop, no port/413/self-deadlock issues
+        const ingested = await directWrite(report.id, report.reportDate, rows);
+        bronzeId = ingested?.bronze_report_id ?? ingested?.id ?? "?";
+      } else {
+        const ingested = await ingestReport(report.id, report.reportDate, rows);
+        bronzeId = ingested?.bronze_report_id ?? "?";
+      }
+      console.log(`  [${report.id}] ✅ Ingested — bronze_id=${bronzeId}`);
       results.success.push(report.id);
     } catch (err) {
       console.error(`  [${report.id}] ❌ FAILED: ${err.message}`);
