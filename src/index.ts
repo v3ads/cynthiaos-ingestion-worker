@@ -521,6 +521,11 @@ app.post('/pipeline/run', async (_req: Request, res: Response) => {
         });
         const report = await insertBronzeReport(wsql, reportType, reportDate, payload);
         await insertPipelineMetadata(wsql, report.id, 'bronze', 'created');
+        // CRITICAL: trigger Bronze→Silver transform, exactly like /ingest/report does.
+        // Without this, new Bronze rows never reach Silver, so Gold promotion finds
+        // 'No Silver records pending' and gold_maintenance stays stale.
+        const transformResult = await triggerTransform();
+        console.log(`[${SERVICE_NAME}] directWrite ${reportType} — bronze_id=${report.id} silver_id=${transformResult?.silver_id ?? '?'}`);
         return { bronze_report_id: report.id, id: report.id };
       };
       const fetchResults = await fetchAndIngestAllReports(directWrite);
